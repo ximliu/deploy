@@ -21,10 +21,30 @@ while [[ $# -ge 1 ]]; do
     esac
 done
 
+if [[ $(curl -m 10 -s https://api.ip.sb/geoip | grep 'China') != "" ]]; then
+    echo -e "${Tip} 根据 ip.sb 提供的信息，当前 IP 可能在中国"
+    read -e -r -p "是否选用镜像完成安装? [Y/n] " input
+    case $input in
+    [yY][eE][sS] | [yY])
+        echo -e "${Tip} 使用中国镜像"
+        FASTGIT="镜像加速"
+        ;;
+    [nN][oO] | [nN])
+        echo -e "${Tip} 不使用中国镜像"
+        ;;
+    *)
+        echo "使用中国镜像"
+        FASTGIT="镜像加速"
+        ;;
+    esac
+fi
+
 [[ $EUID != 0 ]] && echo -e "${Error} 请使用 root 账号运行该脚本！" && exit 1
 
 AURORA_HOME="$HOME/aurora"
+AURORA_HOME_BACKUP="$HOME/aurora_backup"
 AURORA_DOCKER_YML=${AURORA_HOME}/docker-compose.yml
+AURORA_DOCKER_YML_TEMP=${AURORA_HOME}/docker-compose.yml.tmp
 [[ -z $FASTGIT ]] && GITHUB_RAW_URL="raw.githubusercontent.com" || GITHUB_RAW_URL="raw.fastgit.org"
 AURORA_GITHUB="Aurora-Admin-Panel"
 AURORA_YML_URL="https://${GITHUB_RAW_URL}/${AURORA_GITHUB}/deploy/main/docker-compose.yml"
@@ -96,13 +116,11 @@ function install_all() {
 }
 
 function get_config() {
-    echo -e "${Info} 正在下载最新正式版配置文件 ..."
-    wget -q ${AURORA_YML_URL} -O ${AURORA_DOCKER_YML}
-}
-
-function get_dev_config() {
-    echo -e "${Info} 正在下载最新测试版配置文件 ..."
-    wget -q ${AURORA_DEV_YML_URL} -O ${AURORA_DOCKER_YML}
+    echo -e "${Info} 正在下载最新配置文件 ..."
+    [[ $AURORA_VERSION == "DEV" ]] && YML_URL=${AURORA_DEV_YML_URL} || YML_URL=${AURORA_YML_URL}
+    wget -q $YML_URL -O ${AURORA_DOCKER_YML_TEMP}
+    [[ -z $(grep aurora ${AURORA_DOCKER_YML_TEMP}) ]] && echo -e "${Error} 配置文件下载失败，请检查网络连接是否正常！" && exit 1
+    mv -f ${AURORA_DOCKER_YML_TEMP} ${AURORA_DOCKER_YML}
 }
 
 function check_install() {
@@ -184,10 +202,9 @@ function echo_config() {
 function install() {
     install_all
     [[ -n $(docker ps | grep aurora) ]] && echo -e "${Tip} 极光面板已经安装，且正在运行！" && exit 0
-    [ -d ${AURORA_HOME} ] || mkdir -p ${AURORA_HOME}
+    [[ -d ${AURORA_HOME} ]] || mkdir -p ${AURORA_HOME}
     cd ${AURORA_HOME}
-    [[ $AURORA_VERSION = "DEV" ]] && get_dev_config || get_config
-    echo -e "${Info} 下载配置文件中 ..."
+    get_config || exit 1
     echo "-----------------------------------"
     read_config
     read_port
@@ -206,7 +223,7 @@ function update() {
     read_port
     echo_config
     echo "-----------------------------------"
-    [[ $AURORA_VERSION = "DEV" ]] && get_dev_config || get_config
+    get_config || exit 1
     set_config
     set_port ${AURORA_DEF_PORT} $PORT
     echo -e "${Info} 同步新配置文件完成！"
@@ -220,8 +237,20 @@ function update() {
     (echo -e "${Info} 极光面板更新成功！" && exit 0) || (echo -e "${Error} 极光面板更新失败！" && exit 1)
 }
 
+function backup_data_after_uninstall(){
+    if [ ! -d ${AURORA_HOME_BACKUP} ]; then
+        mkdir ${AURORA_HOME_BACKUP}
+    fi
+    cp -f ${AURORA_HOME}/data-*.sql ${AURORA_HOME_BACKUP}/
+    echo -e "${Tip} 已有的数据库备份文件已移动到备份目录：${AURORA_HOME_BACKUP}" && \
+    echo -e "${Tip} 如果不需要备份，可自行删除文件 rm -rf ${AURORA_HOME_BACKUP}"
+}
+
 function uninstall() {
     [ -f ${AURORA_DOCKER_YML} ] || (echo -e "${Tip} 未检测到已经安装极光面板！" && exit 0)
+    [[ -n $(docker ps | grep aurora | grep postgres) ]] && \
+    echo -e "${Tip} 正在备份数据库，如果意外卸载请重新安装面板并恢复数据库！" && backup
+    backup_data_after_uninstall
     cd ${AURORA_HOME}
     [[ -n $(docker ps | grep aurora) ]] && docker-compose down
     OLD_IMG_IDS=$(docker images | grep aurora | awk '{ print $3; }')
